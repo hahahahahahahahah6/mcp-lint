@@ -39,14 +39,15 @@ RULES: Dict[str, tuple] = {
         15,
         "destructive tool description has no confirm/approve/dry-run hint",
     ),
-    "empty-schema": (10, "inputSchema has no properties at all"),
+    "empty-schema": (10, "inputSchema lists required params but defines no properties"),
     "schema-bloat": (5, "more than 8 required params"),
 }
 
 VAGUE_TOKENS = {"do", "make", "handle", "process", "manage", "util", "data"}
 LISTING_TOKENS = {"list", "search", "find", "get_all", "query", "all"}
 DESTRUCTIVE_TOKENS = {"delete", "remove", "destroy", "drop", "purge"}
-PAGINATION_PARAMS = {"limit", "offset", "cursor", "page", "pagesize", "page_size"}
+PAGINATION_PARAMS = {"limit", "offset", "cursor", "page", "pagesize", "page_size",
+                     "max_results", "per_page", "top_k"}
 CONFIRM_HINTS = ("confirm", "approve", "dry-run", "dry run")
 
 
@@ -104,14 +105,23 @@ def lint_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
         if not (param_names & PAGINATION_PARAMS):
             add("no-pagination")
 
-    # 4. destructive tool without confirmation hint
-    if tokens & DESTRUCTIVE_TOKENS:
+    # 4. destructive tool without confirmation hint.
+    # If the tool explicitly declares annotations.destructiveHint (true or
+    # false, per the MCP spec), respect the author's declaration and skip the
+    # name-based heuristic.
+    annotations = tool.get("annotations")
+    destructive_hint = (annotations.get("destructiveHint")
+                        if isinstance(annotations, dict) else None)
+    if tokens & DESTRUCTIVE_TOKENS and destructive_hint is None:
         lowered = description.lower()
         if not any(h in lowered for h in CONFIRM_HINTS):
             add("destructive-no-confirm")
 
-    # 5. empty schema
-    if not props:
+    # 5. empty schema. A schema with no properties AND no required params is
+    # an intentionally empty schema (a legitimate zero-parameter tool like
+    # get_time), not a mistake — only flag it when required params exist but
+    # properties are missing.
+    if not props and _required(tool):
         add("empty-schema")
 
     # 6. schema bloat

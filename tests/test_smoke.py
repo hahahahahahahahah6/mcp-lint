@@ -62,7 +62,7 @@ class LintTests(unittest.TestCase):
         proc = self._run("audit", path, "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         report = json.loads(proc.stdout)
-        self.assertLess(report["score"], 60)
+        self.assertLess(report["score"], 70)
         fired = {f["rule"] for t in report["tools"] for f in t["findings"]}
         for rule in ("missing-description", "short-description",
                      "long-description", "vague-name", "no-pagination",
@@ -120,6 +120,63 @@ class LintTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("[vague-name]", proc.stdout)
         self.assertIn("do_handle_data", proc.stdout)
+
+
+class RegressionTests(unittest.TestCase):
+    """Direct unit tests for the 2026-10-01 review fixes."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import mcp_lint
+        self.lint_tool = mcp_lint.lint_tool
+
+    def _rules(self, tool):
+        return {f["rule"] for f in self.lint_tool(tool)["findings"]}
+
+    def test_destructive_hint_true_respected(self):
+        tool = {"name": "delete_project",
+                "description": "Permanently deletes the project.",
+                "inputSchema": {"type": "object",
+                                "properties": {"id": {"type": "string"}}},
+                "annotations": {"destructiveHint": True}}
+        self.assertNotIn("destructive-no-confirm", self._rules(tool))
+
+    def test_destructive_hint_false_respected(self):
+        tool = {"name": "remove_cache",
+                "description": "Clears the local cache directory.",
+                "inputSchema": {"type": "object",
+                                "properties": {"p": {"type": "string"}}},
+                "annotations": {"destructiveHint": False}}
+        self.assertNotIn("destructive-no-confirm", self._rules(tool))
+
+    def test_destructive_heuristic_still_fires_without_annotations(self):
+        tool = {"name": "delete_project",
+                "description": "Permanently deletes the project.",
+                "inputSchema": {"type": "object",
+                                "properties": {"id": {"type": "string"}}}}
+        self.assertIn("destructive-no-confirm", self._rules(tool))
+
+    def test_zero_param_tool_not_penalized(self):
+        tool = {"name": "get_time",
+                "description": "Returns the current server time as ISO 8601.",
+                "inputSchema": {"type": "object"}}
+        self.assertNotIn("empty-schema", self._rules(tool))
+        self.assertEqual(self.lint_tool(tool)["score"], 100)
+
+    def test_required_without_properties_still_flagged(self):
+        tool = {"name": "run_query",
+                "description": "Runs the saved query and returns its rows.",
+                "inputSchema": {"type": "object", "required": ["query_id"]}}
+        self.assertIn("empty-schema", self._rules(tool))
+
+    def test_pagination_param_variants(self):
+        for param in ("max_results", "per_page", "top_k", "pageSize"):
+            tool = {"name": "list_items",
+                    "description": "Lists items in the store with pagination.",
+                    "inputSchema": {"type": "object",
+                                    "properties": {param: {"type": "integer"}}}}
+            self.assertNotIn("no-pagination", self._rules(tool),
+                             f"pagination param not recognized: {param}")
 
 
 if __name__ == "__main__":
