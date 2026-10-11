@@ -179,5 +179,192 @@ class RegressionTests(unittest.TestCase):
                              f"pagination param not recognized: {param}")
 
 
+class NearDuplicateTests(unittest.TestCase):
+    """Tests for the v0.2.0 near-duplicate-names rule (pairwise check)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import mcp_lint
+        self.mcp_lint = mcp_lint
+
+    def _rules_for(self, tools):
+        report = self.mcp_lint.audit(tools)
+        return {t["name"]: {f["rule"] for f in t["findings"]}
+                for t in report["tools"]}
+
+    def _hint_for(self, tools, name):
+        report = self.mcp_lint.audit(tools)
+        for t in report["tools"]:
+            if t["name"] == name:
+                for f in t["findings"]:
+                    if f["rule"] == "near-duplicate-names":
+                        return f["hint"]
+        return ""
+
+    def test_word_swap_pair_flagged(self):
+        rules = self._rules_for(NEAR_DUP_TOOLS)
+        self.assertIn("near-duplicate-names", rules["search_items"])
+        self.assertIn("near-duplicate-names", rules["item_search"])
+        self.assertIn("item_search", self._hint_for(NEAR_DUP_TOOLS, "search_items"))
+
+    def test_levenshtein_close_with_overlapping_shape_flagged(self):
+        rules = self._rules_for(NEAR_DUP_TOOLS)
+        self.assertIn("near-duplicate-names", rules["get_user"])
+        self.assertIn("near-duplicate-names", rules["get_users"])
+
+    def test_levenshtein_close_with_similar_description_flagged(self):
+        # user_lookup vs user_lookups: 1 edit apart, disjoint param names,
+        # but near-identical descriptions -> still flagged.
+        rules = self._rules_for(NEAR_DUP_TOOLS)
+        self.assertIn("near-duplicate-names", rules["user_lookup"])
+        self.assertIn("near-duplicate-names", rules["user_lookups"])
+
+    def test_levenshtein_close_without_corroboration_not_flagged(self):
+        # search_users vs search_usres: 2 edits apart, but disjoint input
+        # shapes AND unrelated descriptions -> clean.
+        tools = [
+            {"name": "search_users",
+             "description": "Search for user accounts by name fragment.",
+             "inputSchema": {"type": "object",
+                             "properties": {"q": {"type": "string"},
+                                            "limit": {"type": "integer"}},
+                             "required": ["q"]}},
+            {"name": "search_usres",
+             "description": "Export the monthly billing report as CSV.",
+             "inputSchema": {"type": "object",
+                             "properties": {"month": {"type": "string"},
+                                            "page": {"type": "integer"}},
+                             "required": ["month"]}},
+        ]
+        rules = self._rules_for(tools)
+        self.assertNotIn("near-duplicate-names", rules["search_users"])
+        self.assertNotIn("near-duplicate-names", rules["search_usres"])
+
+    def test_short_names_exempt(self):
+        # add vs and: 1 edit apart and identical shapes, but too short to
+        # be a meaningful signal -> clean.
+        tools = [
+            {"name": "add",
+             "description": "Adds two integers and returns their sum.",
+             "inputSchema": {"type": "object",
+                             "properties": {"a": {"type": "integer"},
+                                            "b": {"type": "integer"}},
+                             "required": ["a", "b"]}},
+            {"name": "and",
+             "description": "Bitwise AND of two integers, returns the result.",
+             "inputSchema": {"type": "object",
+                             "properties": {"a": {"type": "integer"},
+                                            "b": {"type": "integer"}},
+                             "required": ["a", "b"]}},
+        ]
+        rules = self._rules_for(tools)
+        self.assertNotIn("near-duplicate-names", rules["add"])
+        self.assertNotIn("near-duplicate-names", rules["and"])
+
+    def test_camelcase_word_swap_flagged(self):
+        tools = [
+            {"name": "searchItems",
+             "description": "Search the product catalog by keyword, paginated.",
+             "inputSchema": {"type": "object",
+                             "properties": {"query": {"type": "string"},
+                                            "limit": {"type": "integer"}},
+                             "required": ["query"]}},
+            {"name": "itemSearch",
+             "description": "Look up products in the catalog with pagination.",
+             "inputSchema": {"type": "object",
+                             "properties": {"query": {"type": "string"},
+                                            "limit": {"type": "integer"}},
+                             "required": ["query"]}},
+        ]
+        rules = self._rules_for(tools)
+        self.assertIn("near-duplicate-names", rules["searchItems"])
+        self.assertIn("near-duplicate-names", rules["itemSearch"])
+
+    def test_exact_duplicate_names_flagged(self):
+        tools = [
+            {"name": "backup_db",
+             "description": "Creates a full backup of the primary database.",
+             "inputSchema": {"type": "object",
+                             "properties": {"dest": {"type": "string"}}}},
+            {"name": "backup_db",
+             "description": "Creates a full backup of the primary database.",
+             "inputSchema": {"type": "object",
+                             "properties": {"dest": {"type": "string"}}}},
+        ]
+        rules = self._rules_for(tools)
+        self.assertIn("near-duplicate-names", rules["backup_db"])
+
+    def test_clean_toolset_has_no_near_duplicate_findings(self):
+        report = self.mcp_lint.audit(CLEAN_TOOLS)
+        self.assertEqual(report["score"], 100)
+        fired = {f["rule"] for t in report["tools"] for f in t["findings"]}
+        self.assertNotIn("near-duplicate-names", fired)
+
+    def test_unpaired_tool_not_flagged_in_mixed_set(self):
+        # search_items is paired with item_search only; it must not also
+        # be flagged as a duplicate of get_user.
+        hint = self._hint_for(NEAR_DUP_TOOLS, "search_items")
+        self.assertNotIn("get_user", hint)
+
+
+NEAR_DUP_TOOLS = [
+    # word-order swap, overlapping input shape
+    {"name": "search_items",
+     "description": "Search the product catalog by keyword. Returns matching items.",
+     "inputSchema": {"type": "object",
+                     "properties": {"query": {"type": "string"},
+                                    "limit": {"type": "integer"}},
+                     "required": ["query"]}},
+    {"name": "item_search",
+     "description": "Look up products in the catalog. Returns items that match the query.",
+     "inputSchema": {"type": "object",
+                     "properties": {"query": {"type": "string"},
+                                    "limit": {"type": "integer"}},
+                     "required": ["query"]}},
+    # Levenshtein-close (1 edit) + overlapping input shape
+    {"name": "get_user",
+     "description": "Fetch a user record by ID. Returns the full user profile.",
+     "inputSchema": {"type": "object",
+                     "properties": {"user_id": {"type": "string"}},
+                     "required": ["user_id"]}},
+    {"name": "get_users",
+     "description": "Fetch user records by ID. Returns full user profiles.",
+     "inputSchema": {"type": "object",
+                     "properties": {"user_id": {"type": "string"}},
+                     "required": ["user_id"]}},
+    # Levenshtein-close + near-identical descriptions, disjoint param names
+    {"name": "user_lookup",
+     "description": "Looks up a user by identifier and returns the full profile.",
+     "inputSchema": {"type": "object",
+                     "properties": {"user_id": {"type": "string"}},
+                     "required": ["user_id"]}},
+    {"name": "user_lookups",
+     "description": "Looks up a user by identifier and returns the full profile.",
+     "inputSchema": {"type": "object",
+                     "properties": {"id": {"type": "string"}},
+                     "required": ["id"]}},
+]
+
+CLEAN_TOOLS = [
+    {"name": "search_repos",
+     "description": "Search public repositories by keyword. Returns a paginated "
+                    "list of repository names, descriptions, and star counts.",
+     "inputSchema": {"type": "object",
+                     "properties": {"query": {"type": "string"},
+                                    "limit": {"type": "integer"},
+                                    "page": {"type": "integer"}},
+                     "required": ["query"]}},
+    {"name": "create_issue",
+     "description": "Opens a new issue in the tracker with the given title and body.",
+     "inputSchema": {"type": "object",
+                     "properties": {"title": {"type": "string"},
+                                    "body": {"type": "string"}},
+                     "required": ["title"]}},
+    {"name": "ping",
+     "description": "Health check. Returns pong when the server is alive and ready.",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+
 if __name__ == "__main__":
     unittest.main()

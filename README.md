@@ -2,7 +2,8 @@
 
 A design linter for MCP servers. Bad MCP tool design — missing or rambling
 descriptions, vague names, unpaginated list tools, destructive tools with no
-confirmation hint — wastes context and confuses agents.
+confirmation hint, near-duplicate tool names — wastes context and confuses
+agents.
 
 ## The pain
 
@@ -73,9 +74,37 @@ mcp-lint audit — 4 tool(s), design score: 85/100
 | `destructive-no-confirm` | delete/remove/destroy/drop/purge tool with no confirm/approve/dry-run hint in description (−15) |
 | `empty-schema` | inputSchema has no properties at all (−10) |
 | `schema-bloat` | more than 8 required params (−5) |
+| `near-duplicate-names` | pairwise: same token bag in different order, identical names, or Levenshtein-close names with overlapping input shape / near-identical descriptions — a confusable pair (−12) |
 
 Each tool starts at 100 and loses points per finding; the server score is
 the mean of its tool scores. 100 = clean.
+
+### v0.2: near-duplicate names
+
+A missing description makes the model hesitate; a near-duplicate name
+makes it **confidently call the wrong tool** — the nastier failure mode.
+mcp-lint now checks every pair of tools in `tools/list`:
+
+- **word-order swap**: `search_items` vs `item_search` (plural-insensitive)
+- **identical names**, modulo separators/case: `backup_db` vs `backup-db`
+- **Levenshtein-close names** (≤ 2 edits, 4+ chars) **plus** corroborating
+  evidence: overlapping input shape, or near-identical descriptions.
+  `get_user` vs `get_users` with the same params is flagged; `add` vs `and`
+  is not.
+
+```
+mcp-lint audit — 2 tool(s), design score: 88/100
+
+  search_items  (score 88/100)
+    - [near-duplicate-names] near-duplicate of 'item_search' (same words, different order/plural) (-12)
+
+  item_search  (score 88/100)
+    - [near-duplicate-names] near-duplicate of 'search_items' (same words, different order/plural) (-12)
+```
+
+Thanks to [arobakid](https://dev.to/arobakid) (Elva) for requesting this
+rule — and for volunteering to test it. He works on OpenAPI→MCP naming
+scoring by day, so this one comes straight from production pain.
 
 ## mcp-lint vs mcp-tax
 

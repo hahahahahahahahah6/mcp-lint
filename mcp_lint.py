@@ -4,7 +4,8 @@
 Statically audits a server's tool definitions and reports design mistakes
 that waste context or confuse agents: missing/rambling descriptions, vague
 names, unpaginated list tools, destructive tools with no confirmation hint,
-empty schemas, and schema bloat.
+empty schemas, schema bloat, and near-duplicate tool names that make an
+agent confidently call the wrong tool.
 
 Usage:
     mcp-lint audit tools.json [--json] [--fail-under N]
@@ -23,7 +24,7 @@ import re
 import sys
 from typing import Any, Dict, List
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # ---------------------------------------------------------------------------
 # Rule catalogue: rule id -> (weight deducted from tool score, explanation)
@@ -41,6 +42,10 @@ RULES: Dict[str, tuple] = {
     ),
     "empty-schema": (10, "inputSchema lists required params but defines no properties"),
     "schema-bloat": (5, "more than 8 required params"),
+    "near-duplicate-names": (
+        12,
+        "near-duplicate of another tool's name (confusable pair)",
+    ),
 }
 
 VAGUE_TOKENS = {"do", "make", "handle", "process", "manage", "util", "data"}
@@ -71,6 +76,117 @@ def _required(schema_tool: Dict[str, Any]) -> List[str]:
         return []
     req = schema.get("required") or []
     return list(req) if isinstance(req, list) else []
+
+
+# ---------------------------------------------------------------------------
+# near-duplicate-names (v0.2.0): a pairwise check across the whole tool list.
+# A missing description makes the model hesitate; a near-duplicate name
+# makes it confidently call the wrong tool — the nastier failure mode.
+# ---------------------------------------------------------------------------
+
+def _norm_name(name: str) -> str:
+    """Lowercase name with every separator stripped: search_items -> searchitems."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Iterative edit distance (stdlib-only)."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1,          # deletion
+                           cur[j - 1] + 1,      # insertion
+                           prev[j - 1] + (ca != cb)))  # substitution
+        prev = cur
+    return prev[-1]
+
+
+def _stem(token: str) -> str:
+    """Light plural stemmer, used only for name-token comparison so that
+    search_items vs item_search still counts as the same word bag."""
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _desc_words(description: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", (description or "").lower()))
+
+
+def _desc_similarity(d1: str, d2: str) -> float:
+    """Jaccard similarity of description word sets. Empty descriptions carry
+    no evidence, so they score 0 rather than 'identical'."""
+    w1, w2 = _desc_words(d1), _desc_words(d2)
+    if not w1 or not w2:
+        return 0.0
+    return len(w1 & w2) / len(w1 | w2)
+
+
+def _shape_overlap(t1: Dict[str, Any], t2: Dict[str, Any]) -> float:
+    """Overlap of inputSchema property names, normalized by the smaller set.
+    Two zero-parameter tools have identical (empty) shapes -> 1.0; a tool
+    with params vs one without -> 0.0."""
+    p1 = set(_properties(t1))
+    p2 = set(_properties(t2))
+    if not p1 and not p2:
+        return 1.0
+    if not p1 or not p2:
+        return 0.0
+    return len(p1 & p2) / min(len(p1), len(p2))
+
+
+def find_near_duplicate_pairs(tools: List[Dict[str, Any]]) -> List[tuple]:
+    """Return [(i, j, reason)] for confusable name pairs in a tool list."""
+    pairs = []
+    names = [t.get("name") or "" for t in tools]
+    for i in range(len(tools)):
+        for j in range(i + 1, len(tools)):
+            n1, n2 = names[i], names[j]
+            if not n1 or not n2:
+                continue
+            # (a) Same token bag in a different order — the classic
+            # search_items vs item_search — or the same name modulo
+            # separators/case. Inherently confusable; no further evidence
+            # needed. Token comparison is plural-insensitive so that a
+            # singular/plural flip doesn't hide the swap.
+            tok1 = sorted(_tokens(n1))
+            tok2 = sorted(_tokens(n2))
+            stem1 = sorted(_stem(t) for t in tok1)
+            stem2 = sorted(_stem(t) for t in tok2)
+            if tok1 == tok2 or stem1 == stem2 or _norm_name(n1) == _norm_name(n2):
+                if n1.lower() == n2.lower():
+                    reason = "identical names"
+                elif _norm_name(n1) == _norm_name(n2):
+                    reason = "identical names (modulo separators/case)"
+                elif tok1 == tok2:
+                    reason = "word-order swap"
+                else:
+                    reason = "same words, different order/plural"
+                pairs.append((i, j, reason))
+                continue
+            # (b) Levenshtein-close names only count when something else
+            # corroborates: overlapping input shape, or near-identical
+            # descriptions. The min-length guard keeps short distinct verbs
+            # like add/and out of the blast radius.
+            na, nb = _norm_name(n1), _norm_name(n2)
+            if na and nb and min(len(na), len(nb)) >= 4:
+                dist = _levenshtein(na, nb)
+                if 0 < dist <= 2:
+                    if _shape_overlap(tools[i], tools[j]) >= 0.5:
+                        pairs.append((i, j, "names differ by %d edit(s); "
+                                            "input shapes overlap" % dist))
+                    elif _desc_similarity(tools[i].get("description") or "",
+                                          tools[j].get("description") or "") >= 0.6:
+                        pairs.append((i, j, "names differ by %d edit(s); "
+                                            "descriptions near-identical" % dist))
+    return pairs
 
 
 def lint_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,6 +273,23 @@ def load_tools(path: str) -> List[Dict[str, Any]]:
 
 def audit(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     tool_reports = [lint_tool(t) for t in tools]
+
+    # Cross-tool rule: near-duplicate names. Applied here (not in lint_tool)
+    # because it needs the whole tool list.
+    nd_weight, _ = RULES["near-duplicate-names"]
+    for i, j, reason in find_near_duplicate_pairs(tools):
+        for idx, other in ((i, j), (j, i)):
+            other_name = tools[other].get("name") or "<unnamed>"
+            tool_reports[idx]["findings"].append({
+                "rule": "near-duplicate-names",
+                "hint": f"near-duplicate of '{other_name}' ({reason})",
+                "weight": nd_weight,
+            })
+            tool_reports[idx]["score"] = max(
+                0,
+                100 - sum(f["weight"] for f in tool_reports[idx]["findings"]),
+            )
+
     score = (
         round(sum(r["score"] for r in tool_reports) / len(tool_reports))
         if tool_reports
