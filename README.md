@@ -45,39 +45,50 @@ mcp-lint audit tools.json --fail-under 80   # exit 1 if score < 80 (CI gate)
 Example output:
 
 ```
-mcp-lint audit — 4 tool(s), design score: 85/100
+mcp-lint audit — 4 tool(s), design score: 85/100 (2 error(s), 2 warning(s))
 
   search_repos  (score 100/100)
     OK — no findings
 
   handle_data  (score 64/100)
-    - [missing-description] tool has no description (-20)
-    - [vague-name] name contains a vague filler word (-6)
-    - [empty-schema] inputSchema has no properties at all (-10)
+    - [missing-description] (error) tool has no description (-20)
+    - [vague-name] (warning) name contains a vague filler word (-6)
+    - [empty-schema] (error) inputSchema has no properties at all (-10)
 
   list_issues  (score 90/100)
-    - [no-pagination] list-style tool has no limit/offset/cursor/page param (-10)
+    - [no-pagination] (error) list-style tool has no limit/offset/cursor/page param (-10)
 
   delete_repo  (score 85/100)
-    - [destructive-no-confirm] destructive tool description has no confirm/approve/dry-run hint (-15)
+    - [destructive-no-confirm] (error) destructive tool description has no confirm/approve/dry-run hint (-15)
 ```
 
 ### Rules
 
-| Rule id | Trigger |
-|---|---|
-| `missing-description` | no description at all (−20) |
-| `short-description` | description under 20 chars (−5) |
-| `long-description` | description over 600 chars — context tax (−5) |
-| `vague-name` | name contains do/make/handle/process/manage/util/data (−6) |
-| `no-pagination` | list/search/find/get_all/query/all tool with no limit/offset/cursor/page param (−10) |
-| `destructive-no-confirm` | delete/remove/destroy/drop/purge tool with no confirm/approve/dry-run hint in description (−15) |
-| `empty-schema` | inputSchema has no properties at all (−10) |
-| `schema-bloat` | more than 8 required params (−5) |
-| `near-duplicate-names` | pairwise: same token bag in different order, identical names, or Levenshtein-close names with overlapping input shape / near-identical descriptions — a confusable pair (−12) |
+| Rule id | Severity | Trigger |
+|---|---|---|
+| `missing-description` | error | no description at all (−20) |
+| `short-description` | warning | description under 20 chars (−5) |
+| `long-description` | warning | description over 600 chars — context tax (−5) |
+| `vague-name` | warning | name contains do/make/handle/process/manage/util/data (−6) |
+| `no-pagination` | error | list/search/find/get_all/query/all tool with no limit/offset/cursor/page param (−10) |
+| `destructive-no-confirm` | error | delete/remove/destroy/drop/purge tool with no confirm/approve/dry-run hint in description (−15) |
+| `empty-schema` | error | inputSchema has no properties at all (−10) |
+| `schema-bloat` | warning | more than 8 required params (−5) |
+| `near-duplicate-names` | warning | pairwise: same token bag in different order, identical names, or Levenshtein-close names with overlapping input shape / near-identical descriptions — a confusable pair (−12) |
 
 Each tool starts at 100 and loses points per finding; the server score is
-the mean of its tool scores. 100 = clean.
+the mean of its tool scores. 100 = clean. Severity is advisory — the score
+math is unchanged — but CI can now distinguish "will confuse the agent"
+(errors) from "worth a cleanup pass" (warnings).
+
+### v0.3: rule severity levels
+
+Every finding now carries a severity. `near-duplicate-names` is
+**warning-level**: the schema isn't broken, but an agent can confidently
+call the wrong tool — e.g. `read_file` vs `readfile` vs `read-file` in the
+same server. Errors are the design mistakes that break agent usage
+(missing descriptions, unpaginated list tools, destructive tools with no
+confirmation hint, empty schemas).
 
 ### v0.2: near-duplicate names
 
@@ -93,13 +104,13 @@ mcp-lint now checks every pair of tools in `tools/list`:
   is not.
 
 ```
-mcp-lint audit — 2 tool(s), design score: 88/100
+mcp-lint audit — 2 tool(s), design score: 88/100 (0 error(s), 2 warning(s))
 
   search_items  (score 88/100)
-    - [near-duplicate-names] near-duplicate of 'item_search' (same words, different order/plural) (-12)
+    - [near-duplicate-names] (warning) near-duplicate of 'item_search' (same words, different order/plural) (-12)
 
   item_search  (score 88/100)
-    - [near-duplicate-names] near-duplicate of 'search_items' (same words, different order/plural) (-12)
+    - [near-duplicate-names] (warning) near-duplicate of 'search_items' (same words, different order/plural) (-12)
 ```
 
 Thanks to [arobakid](https://dev.to/arobakid) (Elva) for requesting this

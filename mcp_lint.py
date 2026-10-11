@@ -7,6 +7,10 @@ names, unpaginated list tools, destructive tools with no confirmation hint,
 empty schemas, schema bloat, and near-duplicate tool names that make an
 agent confidently call the wrong tool.
 
+Every finding carries a severity — "error" for design mistakes that break
+agent usage, "warning" for smells worth fixing. The numeric score is
+unchanged: each tool starts at 100 and loses points per finding.
+
 Usage:
     mcp-lint audit tools.json [--json] [--fail-under N]
 
@@ -24,26 +28,32 @@ import re
 import sys
 from typing import Any, Dict, List
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ---------------------------------------------------------------------------
-# Rule catalogue: rule id -> (weight deducted from tool score, explanation)
+# Rule catalogue: rule id -> (weight deducted from tool score, severity,
+# explanation). Severity is "error" for design mistakes that break agent
+# usage and "warning" for smells worth fixing; near-duplicate names are
+# warning-level: they don't break a schema, they make an agent confidently
+# call the wrong tool.
 # ---------------------------------------------------------------------------
 
 RULES: Dict[str, tuple] = {
-    "missing-description": (20, "tool has no description"),
-    "short-description": (5, "description under 20 chars"),
-    "long-description": (5, "description over 600 chars (context tax)"),
-    "vague-name": (6, "name contains a vague filler word"),
-    "no-pagination": (10, "list-style tool has no limit/offset/cursor/page param"),
+    "missing-description": (20, "error", "tool has no description"),
+    "short-description": (5, "warning", "description under 20 chars"),
+    "long-description": (5, "warning", "description over 600 chars (context tax)"),
+    "vague-name": (6, "warning", "name contains a vague filler word"),
+    "no-pagination": (10, "error", "list-style tool has no limit/offset/cursor/page param"),
     "destructive-no-confirm": (
         15,
+        "error",
         "destructive tool description has no confirm/approve/dry-run hint",
     ),
-    "empty-schema": (10, "inputSchema lists required params but defines no properties"),
-    "schema-bloat": (5, "more than 8 required params"),
+    "empty-schema": (10, "error", "inputSchema lists required params but defines no properties"),
+    "schema-bloat": (5, "warning", "more than 8 required params"),
     "near-duplicate-names": (
         12,
+        "warning",
         "near-duplicate of another tool's name (confusable pair)",
     ),
 }
@@ -196,8 +206,9 @@ def lint_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
     findings: List[Dict[str, str]] = []
 
     def add(rule_id: str) -> None:
-        weight, hint = RULES[rule_id]
-        findings.append({"rule": rule_id, "hint": hint, "weight": weight})
+        weight, severity, hint = RULES[rule_id]
+        findings.append({"rule": rule_id, "severity": severity,
+                         "hint": hint, "weight": weight})
 
     tokens = set(_tokens(name))
     props = _properties(tool)
@@ -275,13 +286,15 @@ def audit(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
     tool_reports = [lint_tool(t) for t in tools]
 
     # Cross-tool rule: near-duplicate names. Applied here (not in lint_tool)
-    # because it needs the whole tool list.
-    nd_weight, _ = RULES["near-duplicate-names"]
+    # because it needs the whole tool list. Warning-level: the schema isn't
+    # broken, but an agent can confidently call the wrong one.
+    nd_weight, nd_severity, _ = RULES["near-duplicate-names"]
     for i, j, reason in find_near_duplicate_pairs(tools):
         for idx, other in ((i, j), (j, i)):
             other_name = tools[other].get("name") or "<unnamed>"
             tool_reports[idx]["findings"].append({
                 "rule": "near-duplicate-names",
+                "severity": nd_severity,
                 "hint": f"near-duplicate of '{other_name}' ({reason})",
                 "weight": nd_weight,
             })
@@ -300,15 +313,21 @@ def audit(tools: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def render_table(report: Dict[str, Any]) -> str:
     lines = []
+    errors = sum(1 for t in report["tools"] for f in t["findings"]
+                 if f.get("severity") == "error")
+    warnings = sum(1 for t in report["tools"] for f in t["findings"]
+                   if f.get("severity") == "warning")
     lines.append(f"mcp-lint audit — {report['tool_count']} tool(s), "
-                 f"design score: {report['score']}/100")
+                 f"design score: {report['score']}/100 "
+                 f"({errors} error(s), {warnings} warning(s))")
     lines.append("")
     for t in report["tools"]:
         header = f"  {t['name']}  (score {t['score']}/100)"
         lines.append(header)
         if t["findings"]:
             for f in t["findings"]:
-                lines.append(f"    - [{f['rule']}] {f['hint']} (-{f['weight']})")
+                lines.append(f"    - [{f['rule']}] ({f.get('severity', 'warning')}) "
+                             f"{f['hint']} (-{f['weight']})")
         else:
             lines.append("    OK — no findings")
         lines.append("")

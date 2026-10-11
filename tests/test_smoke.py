@@ -366,5 +366,171 @@ CLEAN_TOOLS = [
 ]
 
 
+class SeverityAndVariantTests(unittest.TestCase):
+    """v0.3.0: severity levels, and separator/case near-duplicate variants
+    (read_file vs readfile vs read-file)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import mcp_lint
+        self.mcp_lint = mcp_lint
+
+    def _findings_for(self, tools, rule):
+        report = self.mcp_lint.audit(tools)
+        out = {}
+        for t in report["tools"]:
+            out[t["name"]] = [f for f in t["findings"]
+                              if f["rule"] == rule]
+        return report, out
+
+    def _variant_triple(self):
+        return [
+            {"name": "read_file",
+             "description": "Reads a file from disk and returns its text content.",
+             "inputSchema": {"type": "object",
+                             "properties": {"path": {"type": "string"}},
+                             "required": ["path"]}},
+            {"name": "readfile",
+             "description": "Opens a local file and returns what is inside it.",
+             "inputSchema": {"type": "object",
+                             "properties": {"filename": {"type": "string"}},
+                             "required": ["filename"]}},
+            {"name": "read-file",
+             "description": "Loads file bytes off the filesystem for processing.",
+             "inputSchema": {"type": "object",
+                             "properties": {"p": {"type": "string"}},
+                             "required": ["p"]}},
+        ]
+
+    def test_underscore_hyphen_none_variants_all_flagged(self):
+        tools = self._variant_triple()
+        _, out = self._findings_for(tools, "near-duplicate-names")
+        for name in ("read_file", "readfile", "read-file"):
+            self.assertTrue(out[name], f"{name} not flagged")
+
+    def test_each_variant_reports_two_partners(self):
+        # 3 tools -> 3 pairs; each tool is in 2 of them.
+        tools = self._variant_triple()
+        _, out = self._findings_for(tools, "near-duplicate-names")
+        for name in ("read_file", "readfile", "read-file"):
+            self.assertEqual(len(out[name]), 2, name)
+
+    def test_separator_variant_hint_names_the_reason(self):
+        tools = self._variant_triple()
+        _, out = self._findings_for(tools, "near-duplicate-names")
+        hints = " ".join(f["hint"] for f in out["read_file"])
+        self.assertIn("modulo separators/case", hints)
+
+    def test_case_variant_flagged(self):
+        tools = [
+            {"name": "ReadFile",
+             "description": "Reads a file from disk and returns its text content.",
+             "inputSchema": {"type": "object",
+                             "properties": {"path": {"type": "string"}}}},
+            {"name": "read_file",
+             "description": "Opens a local file and returns what is inside it.",
+             "inputSchema": {"type": "object",
+                             "properties": {"p": {"type": "string"}}}},
+        ]
+        _, out = self._findings_for(tools, "near-duplicate-names")
+        self.assertTrue(out["ReadFile"])
+        self.assertTrue(out["read_file"])
+
+    def test_distinct_names_not_flagged(self):
+        tools = [
+            {"name": "get_weather",
+             "description": "Returns the current weather for a city name.",
+             "inputSchema": {"type": "object",
+                             "properties": {"city": {"type": "string"}}}},
+            {"name": "send_email",
+             "description": "Sends an email to the given recipient address.",
+             "inputSchema": {"type": "object",
+                             "properties": {"to": {"type": "string"},
+                                            "body": {"type": "string"}}}},
+            {"name": "list_orders",
+             "description": "Lists recent orders with pagination support.",
+             "inputSchema": {"type": "object",
+                             "properties": {"limit": {"type": "integer"}}}},
+        ]
+        _, out = self._findings_for(tools, "near-duplicate-names")
+        for name, findings in out.items():
+            self.assertEqual(findings, [], f"false positive on {name}")
+
+    def test_near_duplicate_findings_are_warning_level(self):
+        tools = self._variant_triple()
+        report, _ = self._findings_for(tools, "near-duplicate-names")
+        for t in report["tools"]:
+            for f in t["findings"]:
+                if f["rule"] == "near-duplicate-names":
+                    self.assertEqual(f["severity"], "warning")
+
+    def test_error_rules_carry_error_severity(self):
+        tool = {"name": "delete_project",
+                "description": "Permanently deletes the project.",
+                "inputSchema": {"type": "object"}}
+        findings = {f["rule"]: f["severity"]
+                    for f in self.mcp_lint.lint_tool(tool)["findings"]}
+        self.assertEqual(findings["destructive-no-confirm"], "error")
+        tool2 = {"name": "get_time",
+                 "description": "",
+                 "inputSchema": {"type": "object"}}
+        findings2 = {f["rule"]: f["severity"]
+                     for f in self.mcp_lint.lint_tool(tool2)["findings"]}
+        self.assertEqual(findings2["missing-description"], "error")
+
+    def test_warning_rules_carry_warning_severity(self):
+        tool = {"name": "do_stuff",
+                "description": "Does the thing.",
+                "inputSchema": {"type": "object"}}
+        findings = {f["rule"]: f["severity"]
+                    for f in self.mcp_lint.lint_tool(tool)["findings"]}
+        self.assertEqual(findings["vague-name"], "warning")
+        self.assertEqual(findings["short-description"], "warning")
+
+    def test_json_findings_include_severity(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "..")
+        fd, fpath = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(self._variant_triple(), fh)
+        self.addCleanup(os.unlink, fpath)
+        proc = subprocess.run(
+            [sys.executable, CLI, "audit", fpath, "--json"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(proc.stdout)
+        severities = {f["severity"] for t in report["tools"]
+                      for f in t["findings"]}
+        self.assertEqual(severities, {"warning"})
+
+    def test_human_table_shows_severity_and_counts(self):
+        fd, fpath = tempfile.mkstemp(suffix=".json")
+        tools = self._variant_triple() + [
+            {"name": "delete_db",
+             "description": "Permanently wipes the database and all its data.",
+             "inputSchema": {"type": "object"}}]
+        with os.fdopen(fd, "w") as fh:
+            json.dump(tools, fh)
+        self.addCleanup(os.unlink, fpath)
+        proc = subprocess.run(
+            [sys.executable, CLI, "audit", fpath],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("[near-duplicate-names] (warning)", proc.stdout)
+        self.assertIn("[destructive-no-confirm] (error)", proc.stdout)
+        self.assertIn("1 error(s), 6 warning(s)", proc.stdout)
+
+    def test_clean_toolset_summary_shows_zero_counts(self):
+        fd, fpath = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(CLEAN_TOOLS, fh)
+        self.addCleanup(os.unlink, fpath)
+        proc = subprocess.run(
+            [sys.executable, CLI, "audit", fpath],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("design score: 100/100 (0 error(s), 0 warning(s))",
+                      proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
